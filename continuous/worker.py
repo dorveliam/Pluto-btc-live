@@ -6,6 +6,7 @@ import math
 import os
 from pathlib import Path
 import signal
+import shutil
 import sqlite3
 import threading
 import time
@@ -78,6 +79,14 @@ class Recorder:
                             (int(time.time()*1000), code))
 
 
+def storage_available(root):
+    # Include SQLite WAL and journal files; reserve space for one bounded response
+    # and SQLite overhead. Never prune or delete research automatically.
+    used = sum(p.stat().st_size for p in root.glob('pluto-observations.sqlite3*') if p.is_file())
+    reserve = 64 * 1024 * 1024
+    return used < 300 * 1024 * 1024 and shutil.disk_usage(root).free >= reserve
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--once', action='store_true')
@@ -107,6 +116,13 @@ def main():
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stopped.set())
     while not stopped.is_set():
+        # Preserve history: pause all SQLite writes before storage is exhausted.
+        if not storage_available(root):
+            print(json.dumps({'state': 'paused-storage', 'mode': 'observe-only'}), flush=True)
+            if args.once:
+                break
+            stopped.wait(interval)
+            continue
         try:
             req = Request(url, headers={'Authorization': 'Bearer '+token} if token else {})
             with urlopen(req, timeout=10) as response:
@@ -119,7 +135,8 @@ def main():
         except Exception as exc:
             # Never print network exceptions: they can expose endpoint credentials.
             code = str(exc) if type(exc) is ValueError and str(exc).isupper() else type(exc).__name__
-            recorder.fault(code)
+            if storage_available(root):
+                recorder.fault(code)
             print(json.dumps({'state': 'paused-data', 'code': code}), flush=True)
         if args.once:
             break
