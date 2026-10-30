@@ -2,7 +2,9 @@ import copy
 import tempfile
 import unittest
 from pathlib import Path
-from worker import Recorder
+from worker import Recorder, storage_available
+from unittest.mock import patch
+from collections import namedtuple
 
 
 def bundle(contract='KXBTC15M-test', stamp=10000, brti=101):
@@ -43,6 +45,18 @@ class Tests(unittest.TestCase):
         self.r.accept(bundle(),10001)
         self.r.accept(bundle(contract='KXBTC15M-next',stamp=11000),11001)
         self.assertIsNone(self.r.db.execute('SELECT cushion_change FROM observations ORDER BY id DESC LIMIT 1').fetchone()[0])
+
+    def test_storage_guard(self):
+        usage = namedtuple('usage', 'total used free')
+        with patch('worker.shutil.disk_usage', return_value=usage(500, 0, 100*1024*1024)):
+            self.assertTrue(storage_available(Path(self.tmp.name)))
+            wal = Path(self.tmp.name)/'pluto-observations.sqlite3-wal'
+            with wal.open('wb') as f:
+                f.truncate(300*1024*1024)
+            self.assertFalse(storage_available(Path(self.tmp.name)))
+            wal.unlink()
+        with patch('worker.shutil.disk_usage', return_value=usage(500, 0, 63*1024*1024)):
+            self.assertFalse(storage_available(Path(self.tmp.name)))
 
     def test_out_of_order(self):
         self.r.accept(bundle(),10001)
